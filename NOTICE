@@ -1,0 +1,19 @@
+Stalwart WebUI image
+Copyright 2026 sovereign-systems.eu
+
+The files of this repository (Dockerfile, workflows, scripts) are licensed under the
+Apache License, Version 2.0 (see LICENSE).
+
+The image built from it contains, unmodified, the following separately licensed software;
+their licences apply to those programs, not to this repository:
+
+  Stalwart WebUI (stalwartlabs/webui) - GNU AGPL v3 or Stalwart Enterprise License v1
+    Copyright Stalwart Labs LLC
+    /webui/webui.zip, the release asset of the version in the image's
+    org.opencontainers.image.version label. Source code:
+    https://github.com/stalwartlabs/webui/tree/<version>
+    Licence texts: /licenses/AGPL-3.0-only.txt and /licenses/LicenseRef-SEL.txt
+    (vendored in licenses/ of this repository).
+
+  BusyBox (base image docker.io/library/busybox) - GNU GPL v2
+    https://busybox.net, source: https://busybox.net/downloads/

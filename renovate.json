@@ -1,0 +1,98 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits"
+  ],
+  "timezone": "Europe/Berlin",
+  "schedule": [
+    "before 6am"
+  ],
+  "customManagers": [
+    {
+      "description": "The WebUI release and the SHA-256 of its webui.zip in the Dockerfile; Renovate computes the new checksum.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^Dockerfile$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\nARG WEBUI_VERSION=(?<currentValue>\\S+)\\nARG WEBUI_SHA256=(?<currentDigest>[a-f0-9]{64})"
+      ]
+    },
+    {
+      "description": "Tool versions used by the workflows.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/.+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\n\\s+[A-Z_]+_VERSION: \"(?<currentValue>[^\\s\"]+)\""
+      ]
+    },
+    {
+      "description": "Tool images run by the workflows, pinned as image:tag@digest.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/.+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "(?<depName>(?:docker\\.io|ghcr\\.io|quay\\.io)/[a-z0-9._/-]+):(?<currentValue>[A-Za-z0-9._-]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "datasourceTemplate": "docker"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Stable WebUI releases only, skipping the floating v2 tag and pre-releases. Merged a day after the release once CI has verified the bundle; the merge publishes the image. Replacing a release asset does not restart the delay, but the pinned checksum then fails the build.",
+      "matchDatasources": [
+        "github-release-attachments"
+      ],
+      "matchPackageNames": [
+        "stalwartlabs/webui"
+      ],
+      "allowedVersions": "/^v\\d+\\.\\d+\\.\\d+$/",
+      "schedule": [
+        "at any time"
+      ],
+      "minimumReleaseAge": "1 day",
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": false,
+      "commitMessageTopic": "Stalwart WebUI"
+    },
+    {
+      "description": "BusyBox patch and digest updates: merged three days after release once CI has run the image's cp as non-root into a volume. Minor and major versions stay manual.",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "docker.io/library/busybox"
+      ],
+      "matchUpdateTypes": [
+        "patch",
+        "digest"
+      ],
+      "minimumReleaseAge": "3 days",
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": false
+    },
+    {
+      "description": "Manual review: the Dockerfile frontend controls how the image is built, and the GitHub Actions and cosign run with permission to publish and sign.",
+      "matchPackageNames": [
+        "docker.io/docker/dockerfile",
+        "sigstore/cosign"
+      ],
+      "automerge": false
+    },
+    {
+      "description": "Pinned GitHub Actions: one PR, merged by hand.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "groupName": "GitHub Actions",
+      "automerge": false
+    }
+  ]
+}

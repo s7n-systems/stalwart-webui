@@ -1,0 +1,168 @@
+---
+name: "Build"
+
+on:
+  pull_request:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: "read"
+
+concurrency:
+  group: "build-${{ github.ref }}"
+  cancel-in-progress: "${{ github.event_name == 'pull_request' }}"
+
+env:
+  REGISTRY: "ghcr.io"
+  # The bundle is architecture-independent and the Dockerfile has no RUN step, so every
+  # platform of the base image builds without emulation.
+  PLATFORMS: "linux/amd64,linux/arm64,linux/arm/v7,linux/ppc64le,linux/riscv64,linux/s390x"
+
+jobs:
+  lint:
+    name: "Lint"
+    runs-on: "ubuntu-latest"
+    timeout-minutes: 10
+    steps:
+      - uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" # v7.0.1
+        with:
+          persist-credentials: false
+      - name: "Lint YAML"
+        run: "yamllint -c .yamllint.yaml ."
+      - name: "Validate Renovate config is JSON"
+        run: "python3 -m json.tool renovate.json > /dev/null"
+      - name: "Check the scripts"
+        run: |
+          bash -n scripts/test-copy.sh
+          python3 -I -m py_compile scripts/verify_archive.py
+      - name: "Lint GitHub workflows"
+        run: >-
+          docker run --rm -v "$PWD:/repo" -w /repo
+          docker.io/rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+
+  # Read-only: runs for pull requests, including Renovate's, and builds the exact archive that
+  # the publish job pushes. Make "Lint" and "Build and verify" required checks on main.
+  build:
+    name: "Build and verify"
+    runs-on: "ubuntu-latest"
+    timeout-minutes: 20
+    needs: "lint"
+    outputs:
+      digest: "${{ steps.verify.outputs.digest }}"
+      tag: "${{ steps.version.outputs.tag }}"
+    steps:
+      - uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: "docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069" # v4.4.1
+
+      - name: "Read the pinned WebUI version"
+        id: "version"
+        run: |
+          version="$(sed -n 's/^ARG WEBUI_VERSION=//p' Dockerfile)"
+          case "$version" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "WEBUI_VERSION '$version' is not vX.Y.Z" >&2; exit 1 ;;
+          esac
+          echo "tag=${version#v}" >> "$GITHUB_OUTPUT"
+          # Timestamps from the commit, so the same commit builds the same image layers.
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
+      - name: "Build every platform into an OCI archive"
+        uses: "docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc" # v7.4.0
+        with:
+          context: "."
+          platforms: "${{ env.PLATFORMS }}"
+          outputs: "type=oci,dest=${{ runner.temp }}/image.tar,rewrite-timestamp=true"
+          provenance: false
+          sbom: false
+
+      # Reads the archive on the runner; nothing from the image runs.
+      - name: "Verify every platform image"
+        id: "verify"
+        run: |
+          report="$(python3 -I scripts/verify_archive.py "$RUNNER_TEMP/image.tar" Dockerfile "$PLATFORMS")"
+          echo "$report"
+          digest="$(echo "$report" | sed -n 's/^index digest: //p')"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: "Copy the bundle as the chart's init container does"
+        run: |
+          skopeo copy "oci-archive:$RUNNER_TEMP/image.tar" docker-daemon:stalwart-webui:ci
+          scripts/test-copy.sh stalwart-webui:ci
+
+      - uses: "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9" # v7.0.2
+        if: "github.event_name != 'pull_request' && github.ref == 'refs/heads/main'"
+        with:
+          name: "image"
+          path: "${{ runner.temp }}/image.tar"
+          retention-days: 1
+          if-no-files-found: "error"
+
+  # Publishes the verified archive unchanged: to a staging tag first, then signs the digest,
+  # and only then moves the version tag to it, so the version tag never shows an unsigned image.
+  publish:
+    name: "Publish and sign"
+    runs-on: "ubuntu-latest"
+    timeout-minutes: 20
+    needs: "build"
+    if: "github.event_name != 'pull_request' && github.ref == 'refs/heads/main'"
+    concurrency:
+      group: "publish"
+      cancel-in-progress: false
+    permissions:
+      contents: "read"
+      packages: "write"   # push to GHCR
+      id-token: "write"   # keyless cosign signature
+    env:
+      # renovate: datasource=github-releases depName=sigstore/cosign
+      COSIGN_VERSION: "v3.1.4"
+      DIGEST: "${{ needs.build.outputs.digest }}"
+      TAG: "${{ needs.build.outputs.tag }}"
+      OWNER: "${{ github.repository_owner }}"
+    steps:
+      - uses: "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333" # v8.0.2
+        with:
+          name: "image"
+          path: "${{ runner.temp }}"
+      - uses: "docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550" # v4.8.0
+        with:
+          registry: "${{ env.REGISTRY }}"
+          username: "${{ github.actor }}"
+          password: "${{ secrets.GITHUB_TOKEN }}"
+      - uses: "sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532" # v4.1.3
+        with:
+          cosign-release: "${{ env.COSIGN_VERSION }}"
+
+      - name: "Push the archive to the staging tag"
+        run: |
+          image="$REGISTRY/${OWNER,,}/stalwart-webui"
+          echo "IMAGE=$image" >> "$GITHUB_ENV"
+          [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo "No verified digest from the build job" >&2; exit 1; }
+          # skopeo reads the credentials docker/login-action stored.
+          skopeo copy --all --preserve-digests "oci-archive:$RUNNER_TEMP/image.tar" "docker://$image:staging"
+          pushed="sha256:$(skopeo inspect --raw "docker://$image:staging" | sha256sum | awk '{print $1}')"
+          if [ "$pushed" != "$DIGEST" ]; then
+            echo "Pushed $pushed, but the build job verified $DIGEST" >&2
+            exit 1
+          fi
+
+      - name: "Sign the digest and check the signature"
+        run: |
+          cosign sign --yes "$IMAGE@$DIGEST"
+          cosign verify "$IMAGE@$DIGEST" \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/build.yml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" > /dev/null
+
+      - name: "Move the version tag to the signed digest"
+        run: |
+          skopeo copy --all --preserve-digests "docker://$IMAGE@$DIGEST" "docker://$IMAGE:$TAG"
+          tagged="sha256:$(skopeo inspect --raw "docker://$IMAGE:$TAG" | sha256sum | awk '{print $1}')"
+          if [ "$tagged" != "$DIGEST" ]; then
+            echo "$IMAGE:$TAG is $tagged, expected $DIGEST" >&2
+            exit 1
+          fi
+          echo "Published \`$IMAGE:$TAG@$DIGEST\`, signed" >> "$GITHUB_STEP_SUMMARY"
+...

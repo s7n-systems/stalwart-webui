@@ -1,0 +1,19 @@
+---
+extends: "default"
+rules:
+  line-length: "disable"
+  document-start:
+    present: true
+  document-end:
+    present: true
+  # Every string value is double-quoted, so nothing is left to YAML's type guessing.
+  quoted-strings:
+    quote-type: "double"
+    required: true
+    allow-quoted-quotes: true
+  truthy:
+    # GitHub Actions uses the bare `on:` key for triggers.
+    check-keys: false
+  comments:
+    min-spaces-from-content: 1
+...
