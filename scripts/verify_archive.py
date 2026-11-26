@@ -2,7 +2,8 @@
 """Checks a multi-platform OCI archive of the image from the outside: nothing in the image runs.
 
 For every platform image: /webui/webui.zip has the SHA-256 pinned in the Dockerfile, the zip's
-stalwart-app.json names the pinned version, the licence texts are present, and the image runs as
+stalwart-app.json names the pinned version, the licence texts are present, any user can read
+them and enter their directories (the chart copies as a UID of its own), and the image runs as
 UID 65532. The platforms are exactly the expected ones: the init container runs BusyBox cp,
 which has an architecture even though the bundle does not. Prints the digest of the archive's
 top-level index, which publishing preserves.
@@ -77,17 +78,36 @@ class Archive:
         yield platform, self.json(descriptor["digest"])
 
 
-def layer_files(data):
-    """Regular files in a layer, by path; later layers override earlier ones."""
+def layer_files(data, modes):
+    """Regular files in a layer, by path; later layers override earlier ones. Records the mode
+    of the wanted files and of every directory in modes."""
     if data[:2] == b"\x1f\x8b":
         data = gzip.decompress(data)
     files = {}
     with tarfile.open(fileobj=io.BytesIO(data)) as layer:
         for member in layer:
-            name = member.name.lstrip("./")
+            name = member.name.lstrip("./").rstrip("/")
             if member.isfile() and name in WANTED:
                 files[name] = layer.extractfile(member).read()
+                modes[name] = member.mode
+            elif member.isdir():
+                modes[name] = member.mode
     return files
+
+
+def unreadable(modes):
+    """Wanted files others cannot read, and directories on their paths others cannot enter."""
+    problems = []
+    for name in sorted(WANTED):
+        if not modes.get(name, 0) & 0o004:
+            problems.append(f"{name} {oct(modes.get(name, 0))}")
+        parts = name.split("/")[:-1]
+        for i in range(1, len(parts) + 1):
+            directory = "/".join(parts[:i])
+            # A directory missing from the layers comes from the base image (0755 there).
+            if directory in modes and not modes[directory] & 0o001:
+                problems.append(f"{directory}/ {oct(modes[directory])}")
+    return sorted(set(problems))
 
 
 def main():
@@ -105,12 +125,15 @@ def main():
     platforms = []
     for platform, manifest in archive.images(top):
         name = platform_name(platform.get("os"), platform.get("architecture"), platform.get("variant"))
-        files = {}
+        files, modes = {}, {}
         for layer in manifest["layers"]:
-            files.update(layer_files(archive.blob(layer["digest"])))
+            files.update(layer_files(archive.blob(layer["digest"]), modes))
         missing = WANTED - files.keys()
         if missing:
             fail(f"{name}: missing {', '.join(sorted(missing))}")
+        problems = unreadable(modes)
+        if problems:
+            fail(f"{name}: not readable for other users: {', '.join(problems)}")
         actual = hashlib.sha256(files["webui/webui.zip"]).hexdigest()
         if actual != sha256:
             fail(f"{name}: webui.zip is {actual}, the Dockerfile pins {sha256}")

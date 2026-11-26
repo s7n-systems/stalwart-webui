@@ -11,9 +11,11 @@ FROM docker.io/library/busybox:1.38.0-musl@sha256:80e38f9a1b39188b8bdb28879178ed
 ARG WEBUI_VERSION=v2.1.1
 ARG WEBUI_SHA256=2c650f9c155bdb7b4087c0a55dd94f4a211dc0b160f49611cb5ad80383d1b1b7
 
-ADD --checksum=sha256:${WEBUI_SHA256} --chmod=0444 \
+# Symbolic modes, not octal: BuildKit gives an octal --chmod to the parent directories it creates
+# too, and /webui at 0444 cannot be entered by the init container's non-root user.
+ADD --checksum=sha256:${WEBUI_SHA256} --chmod=a=rX \
     https://github.com/stalwartlabs/webui/releases/download/${WEBUI_VERSION}/webui.zip /webui/webui.zip
-COPY --chmod=0444 licenses/ /licenses/
+COPY --chmod=a=rX licenses/ /licenses/
 
 LABEL org.opencontainers.image.title="Stalwart WebUI bundle" \
       org.opencontainers.image.description="Unmodified webui.zip of stalwartlabs/webui ${WEBUI_VERSION}, for Stalwart to load from a file:// resource URL" \

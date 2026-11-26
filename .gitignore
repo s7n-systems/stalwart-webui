@@ -2,3 +2,5 @@
 .codex/
 .agents/
 .qwen/
+__pycache__/
+*.pyc
